@@ -1,6 +1,7 @@
 import json
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+import asyncio
 
 # ================== CONFIG ==================
 api_id = 28593100
@@ -49,36 +50,62 @@ async def start(client, message: Message):
     )
     save_user(message.from_user.id)
 
-# Bulk approve command
-@app.on_message(filters.command("approveall") & (filters.group | filters.channel))
+# Bulk approve command - FIXED
+@app.on_message(filters.command("approveall"))
 async def approve_all(client, message: Message):
-    chat = message.chat
-    reqs = []
-    async for req in client.get_chat_join_requests(chat.id, limit=20000):
-        reqs.append(req)
-
-    if not reqs:
-        await message.reply_text("🙂 No pending join requests found.")
+    # Check if the command is used in a group or channel
+    if message.chat.type not in ["group", "supergroup", "channel"]:
+        await message.reply_text("❌ This command can only be used in groups or channels!")
+        return
+    
+    # Check if the bot is admin in the chat
+    bot_info = await client.get_chat_member(message.chat.id, "me")
+    if not bot_info.privileges or not bot_info.privileges.can_invite_users:
+        await message.reply_text("❌ I need to be an admin with 'Add Members' permission to approve requests!")
+        return
+    
+    # Check if the user sending the command is an admin
+    user_info = await client.get_chat_member(message.chat.id, message.from_user.id)
+    if user_info.status not in ["creator", "administrator"]:
+        await message.reply_text("❌ You need to be an admin to use this command!")
         return
 
-    approved = 0
-    for user in reqs:
-        try:
-            await client.approve_chat_join_request(chat.id, user.from_user.id)
-            if not user.from_user.is_bot:
-                try:
-                    await client.send_message(
-                        user.from_user.id,
-                        f"👋 Hello {user.from_user.mention},\n\n"
-                        f"✅ Your request has been accepted!\n"
-                        f"🎉 Approved by **AutoApprove Bot** in: {chat.title}"
-                    )
-                    save_user(user.from_user.id)
-                except: pass
-            approved += 1
-        except: pass
+    processing_msg = await message.reply_text("⏳ Processing pending join requests...")
+    
+    try:
+        reqs = []
+        async for req in client.get_chat_join_requests(message.chat.id):
+            reqs.append(req)
 
-    await message.reply_text(f"✅ Approved **{approved}** members successfully in **{chat.title}**!")
+        if not reqs:
+            await processing_msg.edit_text("🙂 No pending join requests found.")
+            return
+
+        approved = 0
+        for user in reqs:
+            try:
+                await client.approve_chat_join_request(message.chat.id, user.from_user.id)
+                if not user.from_user.is_bot:
+                    try:
+                        await client.send_message(
+                            user.from_user.id,
+                            f"👋 Hello {user.from_user.mention},\n\n"
+                            f"✅ Your request has been accepted!\n"
+                            f"🎉 Approved by **AutoApprove Bot** in: {message.chat.title}"
+                        )
+                        save_user(user.from_user.id)
+                    except: 
+                        pass
+                approved += 1
+                # Small delay to avoid rate limits
+                await asyncio.sleep(0.5)
+            except Exception as e:
+                print(f"Error approving {user.from_user.id}: {e}")
+                continue
+
+        await processing_msg.edit_text(f"✅ Approved **{approved}** members successfully in **{message.chat.title}**!")
+    except Exception as e:
+        await processing_msg.edit_text(f"❌ Error: {str(e)}")
 
 # Auto approve join requests
 @app.on_chat_join_request(filters.group | filters.channel)
@@ -99,7 +126,8 @@ async def autoapprove(client, request):
                     f"🎉 Approved by **AutoApprove Bot** in: {chat.title}"
                 )
                 save_user(user.id)
-            except: pass
+            except: 
+                pass
     except Exception as e:
         print(f"❌ Error: {e}")
 
@@ -115,15 +143,27 @@ async def broadcast(client, message: Message):
     total = len(users)
     success = 0
     fail = 0
+    
+    processing_msg = await message.reply_text(f"📢 Broadcasting to {total} users...")
 
     for uid in users:
         try:
             await client.send_message(uid, text)
             success += 1
+            # Update status every 10 messages
+            if success % 10 == 0:
+                await processing_msg.edit_text(
+                    f"📢 Broadcasting...\n"
+                    f"✅ Success: {success}\n"
+                    f"❌ Failed: {fail}\n"
+                    f"📊 Total: {total}"
+                )
+            # Small delay to avoid rate limits
+            await asyncio.sleep(0.1)
         except:
             fail += 1
 
-    await message.reply_text(
+    await processing_msg.edit_text(
         f"📢 **Broadcast Summary**\n\n"
         f"👥 Total Users: {total}\n"
         f"✅ Success: {success}\n"
