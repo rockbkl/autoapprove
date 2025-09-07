@@ -39,7 +39,7 @@ app = Client("AutoApprovedBot", bot_token=bot_token, api_id=api_id, api_hash=api
 @app.on_message(filters.private & filters.command("start"))
 async def start(client, message: Message):
     me = await client.get_me()
-    button = [[InlineKeyboardButton("➕ Add Me To Channel/Group", url=f"http://t.me/{me.username}?startgroup=botstart")]]
+    button = [[InlineKeyboardButton("➕ Add Me To Channel", url=f"http://t.me/{me.username}?startgroup=botstart")]]
     await message.reply_text(
         f"👋 Hello {message.from_user.mention}, I am **Auto Approve Bot**!\n\n"
         "✅ Add me as **Admin** in your channel/group (with Add Members permission).\n"
@@ -51,15 +51,13 @@ async def start(client, message: Message):
     )
     save_user(message.from_user.id)
 
-# Bulk approve (works in groups + channels with raw method)
-@app.on_message(filters.command("approveall") & (filters.group | filters.supergroup | filters.channel))
+
+# Bulk approve command
+@app.on_message(filters.command("approveall"))
 async def approve_all(client, message: Message):
     chat = message.chat
-
-    # Check bot admin privileges
-    bot_info = await client.get_chat_member(chat.id, "me")
-    if not bot_info.privileges or not bot_info.privileges.can_invite_users:
-        await message.reply_text("❌ I need to be an admin with 'Add Members' permission to approve requests!")
+    if chat.type not in ["group", "supergroup", "channel"]:
+        await message.reply_text("❌ This command can only be used in groups or channels!")
         return
 
     processing_msg = await message.reply_text("⏳ Processing pending join requests...")
@@ -68,10 +66,11 @@ async def approve_all(client, message: Message):
     failed = 0
 
     try:
-        # Pyrogram high-level API (may fail in channels)
+        # 🔹 Try normal method first
         async for req in client.get_chat_join_requests(chat.id):
             try:
                 await client.approve_chat_join_request(chat.id, req.from_user.id)
+                approved += 1
                 if not req.from_user.is_bot:
                     try:
                         await client.send_message(
@@ -83,17 +82,18 @@ async def approve_all(client, message: Message):
                         save_user(req.from_user.id)
                     except:
                         pass
-                approved += 1
                 await asyncio.sleep(0.3)
             except Exception as e:
-                print(f"Error approving {req.from_user.id}: {e}")
+                print(f"Normal approve error: {e}")
                 failed += 1
-    except Exception:
-        # Fallback: Raw API for channels
+
+        # 🔹 Raw API fallback (for channels mainly)
         try:
             importers = await client.invoke(
                 functions.messages.GetChatInviteImporters(
                     peer=await client.resolve_peer(chat.id),
+                    offset_date=0,
+                    offset_user=0,
                     limit=100
                 )
             )
@@ -123,14 +123,13 @@ async def approve_all(client, message: Message):
                     print(f"Raw approve fail: {e}")
                     failed += 1
         except Exception as e:
-            await processing_msg.edit_text(f"❌ Error: {str(e)}")
-            return
+            print(f"Raw API error: {e}")
 
-    await processing_msg.edit_text(
-        f"✅ Approved: {approved}\n"
-        f"❌ Failed: {failed}\n"
-        f"📌 Chat: {chat.title}"
-    )
+        await processing_msg.edit_text(f"✅ Approved **{approved}** members in **{chat.title}**!\n❌ Failed: {failed}")
+
+    except Exception as e:
+        await processing_msg.edit_text(f"❌ Error: {str(e)}")
+
 
 # Auto approve join requests
 @app.on_chat_join_request(filters.group | filters.channel)
@@ -151,10 +150,11 @@ async def autoapprove(client, request):
                     f"🎉 Approved by **AutoApprove Bot** in: {chat.title}"
                 )
                 save_user(user.id)
-            except:
+            except: 
                 pass
     except Exception as e:
-        print(f"❌ Error: {e}")
+        print(f"❌ Auto-approve Error: {e}")
+
 
 # Broadcast command (Owner only)
 @app.on_message(filters.private & filters.command("broadcast") & filters.user(OWNER_ID))
@@ -192,6 +192,7 @@ async def broadcast(client, message: Message):
         f"✅ Success: {success}\n"
         f"❌ Failed: {fail}"
     )
+
 
 if __name__ == "__main__":
     print("🚀 Auto Approve Bot with Broadcast started...")
