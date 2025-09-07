@@ -1,7 +1,8 @@
 import json
+import asyncio
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
-import asyncio
+from pyrogram.raw import functions
 
 # ================== CONFIG ==================
 api_id = 28593100
@@ -50,59 +51,86 @@ async def start(client, message: Message):
     )
     save_user(message.from_user.id)
 
-# Bulk approve command (works in group + supergroup + channel)
+# Bulk approve (works in groups + channels with raw method)
 @app.on_message(filters.command("approveall") & (filters.group | filters.supergroup | filters.channel))
 async def approve_all(client, message: Message):
     chat = message.chat
 
-    # Check if bot is admin
+    # Check bot admin privileges
     bot_info = await client.get_chat_member(chat.id, "me")
     if not bot_info.privileges or not bot_info.privileges.can_invite_users:
         await message.reply_text("❌ I need to be an admin with 'Add Members' permission to approve requests!")
         return
 
-    # Check if command user is admin (only for groups/supergroups)
-    if chat.type in ["group", "supergroup"]:
-        user_info = await client.get_chat_member(chat.id, message.from_user.id)
-        if user_info.status not in ["creator", "administrator"]:
-            await message.reply_text("❌ You need to be an admin to use this command!")
-            return
-
     processing_msg = await message.reply_text("⏳ Processing pending join requests...")
 
+    approved = 0
+    failed = 0
+
     try:
-        reqs = []
+        # Pyrogram high-level API (may fail in channels)
         async for req in client.get_chat_join_requests(chat.id):
-            reqs.append(req)
-
-        if not reqs:
-            await processing_msg.edit_text("🙂 No pending join requests found.")
-            return
-
-        approved = 0
-        for user in reqs:
             try:
-                await client.approve_chat_join_request(chat.id, user.from_user.id)
-                if not user.from_user.is_bot:
+                await client.approve_chat_join_request(chat.id, req.from_user.id)
+                if not req.from_user.is_bot:
                     try:
                         await client.send_message(
-                            user.from_user.id,
-                            f"👋 Hello {user.from_user.mention},\n\n"
+                            req.from_user.id,
+                            f"👋 Hello {req.from_user.mention},\n\n"
                             f"✅ Your request has been accepted!\n"
                             f"🎉 Approved by **AutoApprove Bot** in: {chat.title}"
                         )
-                        save_user(user.from_user.id)
+                        save_user(req.from_user.id)
                     except:
                         pass
                 approved += 1
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.3)
             except Exception as e:
-                print(f"Error approving {user.from_user.id}: {e}")
-                continue
+                print(f"Error approving {req.from_user.id}: {e}")
+                failed += 1
+    except Exception:
+        # Fallback: Raw API for channels
+        try:
+            importers = await client.invoke(
+                functions.messages.GetChatInviteImporters(
+                    peer=await client.resolve_peer(chat.id),
+                    limit=100
+                )
+            )
+            for user in importers.importers:
+                try:
+                    await client.invoke(
+                        functions.messages.HideChatJoinRequest(
+                            peer=await client.resolve_peer(chat.id),
+                            user_id=user.user_id,
+                            approved=True
+                        )
+                    )
+                    approved += 1
+                    try:
+                        u = await client.get_users(user.user_id)
+                        if not u.is_bot:
+                            await client.send_message(
+                                u.id,
+                                f"👋 Hello {u.mention},\n\n"
+                                f"✅ Your request has been accepted!\n"
+                                f"🎉 Approved by **AutoApprove Bot** in: {chat.title}"
+                            )
+                            save_user(u.id)
+                    except:
+                        pass
+                except Exception as e:
+                    print(f"Raw approve fail: {e}")
+                    failed += 1
+        except Exception as e:
+            await processing_msg.edit_text(f"❌ Error: {str(e)}")
+            return
 
-        await processing_msg.edit_text(f"✅ Approved **{approved}** members successfully in **{chat.title}**!")
-    except Exception as e:
-        await processing_msg.edit_text(f"❌ Error: {str(e)}")
+    await processing_msg.edit_text(
+        f"✅ Approved: {approved}\n"
+        f"❌ Failed: {failed}\n"
+        f"📌 Chat: {chat.title}"
+    )
 
 # Auto approve join requests
 @app.on_chat_join_request(filters.group | filters.channel)
